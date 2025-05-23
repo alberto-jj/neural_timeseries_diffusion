@@ -73,12 +73,14 @@ class FIFDataLoader(Dataset):
 
     Processes data into tensors and optionally includes subject IDs and class labels.
     Assumes filenames follow a convention like CLASSLABEL_SUBJECTID_*.fif for label extraction.
+    `sfreq`, `n_channels`, and `n_times` (epoch length in points) are inferred from the first valid file.
+    Subsequent files must match these inferred parameters to be included.
     """
 
     def __init__(
         self,
         file_path,
-        n_epochs,
+        n_epochs=None, # Max epochs per file. If None or 0, use all epochs from file.
         condition_on_subject_id=False,
         condition_on_class_label=False,
     ):
@@ -87,17 +89,18 @@ class FIFDataLoader(Dataset):
 
         Args:
             file_path (str): Path to a directory of .fif files or a single .fif file.
-            n_epochs (int): Number of epochs to use from each subject/file.
-                            The data is expected to have 20 epochs, each 5s long (1000 time points at 200Hz).
+            n_epochs (int, optional): Maximum number of epochs to use from each subject/file.
+                                     If None, 0, or greater than available epochs in a file,
+                                     all epochs from that file are used. Defaults to None.
             condition_on_subject_id (bool): If True, extract and store subject IDs.
             condition_on_class_label (bool): If True, extract and store class labels.
         """
         self.file_path = file_path
-        self.n_epochs_per_subject = n_epochs # n_epochs to use from each subject's file
+        self.n_epochs_max_per_file = n_epochs 
         self.condition_on_subject_id = condition_on_subject_id
         self.condition_on_class_label = condition_on_class_label
 
-        all_epoch_data = []
+        all_signals_list = [] # Renamed from all_epoch_data
         all_subject_ids_str = []
         all_class_labels_str = []
         
@@ -106,12 +109,16 @@ class FIFDataLoader(Dataset):
         self.subject_str_to_int_id = {}
         self.next_subject_int_id = 0
 
-        # Expected data parameters
-        self.expected_channels = 19
-        self.expected_time_points = 1000 # 5 seconds * 200 Hz
+        # Parameters to be inferred from the first valid file
+        self.sfreq = None
+        self.n_channels = None
+        self.n_times = None
+        first_file_processed = False
 
         if os.path.isdir(self.file_path):
             # Sort files for deterministic order
+            # TODO: Consider adding recursive glob here if subdirectories are common.
+            # For now, matches existing behavior (files directly in the given directory).
             file_paths = sorted(glob.glob(os.path.join(self.file_path, "*.fif")))
         elif os.path.isfile(self.file_path) and self.file_path.endswith(".fif"):
             file_paths = [self.file_path]
@@ -125,51 +132,74 @@ class FIFDataLoader(Dataset):
 
         for fp in file_paths:
             try:
-                # verbose='WARNING' to reduce MNE's console output
-                epochs = mne.read_epochs(fp, preload=True, verbose="WARNING")
+                current_epochs_object = mne.read_epochs(fp, preload=True, verbose="WARNING")
             except Exception as e:
                 print(f"Warning: Could not read or process {fp}. Skipping. Error: {e}")
                 continue
 
-            if len(epochs) < self.n_epochs_per_subject:
-                print(
-                    f"Warning: Not enough epochs in {fp} (found {len(epochs)}, required {self.n_epochs_per_subject}). Skipping this file."
-                )
+            current_sfreq = current_epochs_object.info['sfreq']
+            # Use get_data(copy=False) if only shape is needed initially, but we need data later.
+            # Let's get data once and then derive shape.
+            try:
+                # Picks 'eeg' and converts to float64 for consistency before potential slicing.
+                ep_data_full = current_epochs_object.get_data(picks="eeg").astype(np.float64)
+            except Exception as e:
+                print(f"Warning: Could not get EEG data from {fp}. Skipping. Error: {e}")
                 continue
 
-            # Data shape: (n_epochs, n_channels, n_times)
-            # MNE's get_data() returns data in Volts.
-            # Ensure data is float64 for mne processing, will be converted to float32 for torch later.
-            # Select the specified n_epochs_per_subject and up to expected_time_points
-            epoch_data = epochs.get_data(picks="eeg").astype(np.float64)[
-                : self.n_epochs_per_subject, :, : self.expected_time_points
-            ]
-            
-            # Validate data shape
-            if epoch_data.shape[1] != self.expected_channels:
-                print(
-                    f"Warning: Data in {fp} has {epoch_data.shape[1]} channels, expected {self.expected_channels}. Skipping this file."
-                )
-                continue
-            if epoch_data.shape[2] != self.expected_time_points:
-                print(
-                    f"Warning: Data in {fp} has {epoch_data.shape[2]} time points, expected {self.expected_time_points}. Skipping this file."
-                )
-                continue
-            
-            all_epoch_data.append(epoch_data)
+            _num_ep_in_file_full, current_n_channels, current_n_times = ep_data_full.shape
 
+            if not first_file_processed:
+                self.sfreq = current_sfreq
+                self.n_channels = current_n_channels
+                self.n_times = current_n_times
+                first_file_processed = True
+                print(
+                    f"INFO: Inferred parameters from first file {fp}: "
+                    f"sfreq={self.sfreq}, n_channels={self.n_channels}, n_times={self.n_times}"
+                )
+            else:
+                if (current_sfreq != self.sfreq or
+                    current_n_channels != self.n_channels or
+                    current_n_times != self.n_times):
+                    print(
+                        f"Warning: File {fp} parameters (sfreq={current_sfreq}, "
+                        f"n_channels={current_n_channels}, n_times={current_n_times}) "
+                        f"do not match inferred parameters (sfreq={self.sfreq}, "
+                        f"n_channels={self.n_channels}, n_times={self.n_times}). Skipping."
+                    )
+                    continue
+            
+            # Handle n_epochs (max epochs per file)
+            n_epochs_in_file = ep_data_full.shape[0]
+            epochs_to_take = n_epochs_in_file
+
+            if self.n_epochs_max_per_file is not None and self.n_epochs_max_per_file > 0:
+                if n_epochs_in_file < self.n_epochs_max_per_file:
+                    print(
+                        f"Warning: File {fp} has {n_epochs_in_file} epochs, which is less than "
+                        f"requested n_epochs={self.n_epochs_max_per_file}. Using all {n_epochs_in_file} epochs from this file."
+                    )
+                epochs_to_take = min(n_epochs_in_file, self.n_epochs_max_per_file)
+            
+            if epochs_to_take == 0 : # Should not happen if n_epochs_max_per_file > 0 or None
+                print(f"Warning: Zero epochs selected for file {fp}. Skipping.")
+                continue
+
+            current_epoch_data_selected = ep_data_full[:epochs_to_take, :, :]
+            all_signals_list.append(current_epoch_data_selected)
+
+            # --- Label and Subject ID extraction (remains largely the same, but uses epochs_to_take) ---
             filename = os.path.basename(fp)
-            parts = filename.split("_") # e.g., CLASSLABEL_SUBJECTID_*.fif
+            parts = filename.split("_")
 
-            # Extract class label
             if self.condition_on_class_label:
-                if len(parts) >= 2: # Expect at least CLASSLABEL_SUBJECTID
+                if len(parts) >= 2:
                     class_label_str = parts[0]
                     if class_label_str not in self.label_to_int_id:
                         self.label_to_int_id[class_label_str] = self.next_class_int_id
                         self.next_class_int_id += 1
-                    all_class_labels_str.extend([class_label_str] * epoch_data.shape[0])
+                    all_class_labels_str.extend([class_label_str] * epochs_to_take)
                 else:
                     default_class_label = "UnknownClass"
                     print(
@@ -178,35 +208,37 @@ class FIFDataLoader(Dataset):
                     if default_class_label not in self.label_to_int_id:
                         self.label_to_int_id[default_class_label] = self.next_class_int_id
                         self.next_class_int_id +=1
-                    all_class_labels_str.extend([default_class_label] * epoch_data.shape[0])
+                    all_class_labels_str.extend([default_class_label] * epochs_to_take)
 
-            # Extract subject ID
             if self.condition_on_subject_id:
-                if len(parts) >= 2: # Expect at least CLASSLABEL_SUBJECTID
+                if len(parts) >= 2:
                     subject_id_str = parts[1]
                     if subject_id_str not in self.subject_str_to_int_id:
                         self.subject_str_to_int_id[subject_id_str] = self.next_subject_int_id
                         self.next_subject_int_id += 1
-                    all_subject_ids_str.extend([subject_id_str] * epoch_data.shape[0])
-                else: # Fallback if filename doesn't have enough parts
-                    default_subject_id = filename.split(".")[0] # Use filename without extension as ID
+                    all_subject_ids_str.extend([subject_id_str] * epochs_to_take)
+                else:
+                    default_subject_id = filename.split(".")[0]
                     print(
                         f"Warning: Filename {filename} does not follow CLASSLABEL_SUBJECTID_*.fif convention for subject ID. Using '{default_subject_id}' as ID."
                     )
                     if default_subject_id not in self.subject_str_to_int_id:
                         self.subject_str_to_int_id[default_subject_id] = self.next_subject_int_id
                         self.next_subject_int_id += 1
-                    all_subject_ids_str.extend([default_subject_id] * epoch_data.shape[0])
+                    all_subject_ids_str.extend([default_subject_id] * epochs_to_take)
+        # --- End of file loop ---
 
-        if not all_epoch_data:
+        if not all_signals_list: # Check if the list is empty
             raise ValueError(
-                "No valid data loaded. All files were skipped or resulted in errors. Check warnings for details."
+                "No valid EEG data loaded. Check file paths, format, and consistency of "
+                "data parameters (sfreq, n_channels, n_times) across files."
             )
 
         # Concatenate data from all files
-        self.data_array_np = np.concatenate(all_epoch_data, axis=0)
+        self.data_array_np = np.concatenate(all_signals_list, axis=0)
         # Standardize data across epochs and time dimensions (mean 0, std 1)
-        self.data_array_np = standardize_array(self.data_array_np, ax=(0, 2)) # ax=(0,2) standardizes each channel independently over epochs and time
+        # ax=(0,2) standardizes each channel independently over all concatenated epochs and time points
+        self.data_array_np = standardize_array(self.data_array_np, ax=(0, 2)) 
         self.data = torch.from_numpy(self.data_array_np).float() # Convert to float32 tensor
 
         if self.condition_on_subject_id:
