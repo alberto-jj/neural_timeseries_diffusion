@@ -1,0 +1,25 @@
+# @package _group_
+_target_: ntd.datasets.FIFDataLoader
+name: fif_example
+# Path to the directory containing .fif files or a single .fif file
+# Example: '/path/to/your/eeg/data/' or '/path/to/your/eeg/data/subject1.fif'
+file_path: ???
+n_channels: 19
+# Number of epochs to load per subject/file.
+# Assumes each epoch is 5 seconds long at 200 Hz (1000 time points).
+n_epochs: 20
+sfreq: 200
+# Set to True to enable conditioning on subject ID.
+# Subject IDs are derived from filenames if multiple files are loaded from a directory.
+condition_on_subject_id: False
+# Set to True to enable conditioning on class label.
+# Class labels are extracted from filenames using the convention: CLASSLABEL_SUBJECTID_*.fif
+# e.g., PATIENT_S001_data.fif, CONTROL_S002_data.fif
+condition_on_class_label: False
+
+# Example for conditional generation on class_label:
+# condition_on_class_label: True
+# num_classes: 3 # Specify the total number of unique classes
+
+# Data shape will be (n_subjects * n_epochs, n_channels, signal_length)
+# where signal_length is typically n_times from the epoch object (e.g., 1000 for 5s at 200Hz)
