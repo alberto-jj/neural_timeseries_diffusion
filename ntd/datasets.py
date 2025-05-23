@@ -5,6 +5,8 @@ import torch
 import xarray as xr
 from scipy import io
 from torch.utils.data.dataset import Dataset
+import mne
+import glob
 
 from ntd.utils.utils import standardize_array
 
@@ -63,6 +65,184 @@ def load_ecog_data(session_path, channels, signal_length, start_time, end_time):
     )
     splitted = np.split(ecog, splitter, axis=1)
     return np.array(splitted[:-1])
+
+
+class FIFDataLoader(Dataset):
+    """
+    Dataset loader for EEG data from .fif files.
+
+    Processes data into tensors and optionally includes subject IDs and class labels.
+    Assumes filenames follow a convention like CLASSLABEL_SUBJECTID_*.fif for label extraction.
+    """
+
+    def __init__(
+        self,
+        file_path,
+        n_epochs,
+        condition_on_subject_id=False,
+        condition_on_class_label=False,
+    ):
+        """
+        Initializes the FIFDataLoader.
+
+        Args:
+            file_path (str): Path to a directory of .fif files or a single .fif file.
+            n_epochs (int): Number of epochs to use from each subject/file.
+                            The data is expected to have 20 epochs, each 5s long (1000 time points at 200Hz).
+            condition_on_subject_id (bool): If True, extract and store subject IDs.
+            condition_on_class_label (bool): If True, extract and store class labels.
+        """
+        self.file_path = file_path
+        self.n_epochs_per_subject = n_epochs # n_epochs to use from each subject's file
+        self.condition_on_subject_id = condition_on_subject_id
+        self.condition_on_class_label = condition_on_class_label
+
+        all_epoch_data = []
+        all_subject_ids_str = []
+        all_class_labels_str = []
+        
+        self.label_to_int_id = {}
+        self.next_class_int_id = 0
+        self.subject_str_to_int_id = {}
+        self.next_subject_int_id = 0
+
+        # Expected data parameters
+        self.expected_channels = 19
+        self.expected_time_points = 1000 # 5 seconds * 200 Hz
+
+        if os.path.isdir(self.file_path):
+            # Sort files for deterministic order
+            file_paths = sorted(glob.glob(os.path.join(self.file_path, "*.fif")))
+        elif os.path.isfile(self.file_path) and self.file_path.endswith(".fif"):
+            file_paths = [self.file_path]
+        else:
+            raise ValueError(
+                "file_path must be a valid .fif file or a directory containing .fif files."
+            )
+
+        if not file_paths:
+            raise ValueError(f"No .fif files found in {self.file_path}.")
+
+        for fp in file_paths:
+            try:
+                # verbose='WARNING' to reduce MNE's console output
+                epochs = mne.read_epochs(fp, preload=True, verbose="WARNING")
+            except Exception as e:
+                print(f"Warning: Could not read or process {fp}. Skipping. Error: {e}")
+                continue
+
+            if len(epochs) < self.n_epochs_per_subject:
+                print(
+                    f"Warning: Not enough epochs in {fp} (found {len(epochs)}, required {self.n_epochs_per_subject}). Skipping this file."
+                )
+                continue
+
+            # Data shape: (n_epochs, n_channels, n_times)
+            # MNE's get_data() returns data in Volts.
+            # Ensure data is float64 for mne processing, will be converted to float32 for torch later.
+            # Select the specified n_epochs_per_subject and up to expected_time_points
+            epoch_data = epochs.get_data(picks="eeg").astype(np.float64)[
+                : self.n_epochs_per_subject, :, : self.expected_time_points
+            ]
+            
+            # Validate data shape
+            if epoch_data.shape[1] != self.expected_channels:
+                print(
+                    f"Warning: Data in {fp} has {epoch_data.shape[1]} channels, expected {self.expected_channels}. Skipping this file."
+                )
+                continue
+            if epoch_data.shape[2] != self.expected_time_points:
+                print(
+                    f"Warning: Data in {fp} has {epoch_data.shape[2]} time points, expected {self.expected_time_points}. Skipping this file."
+                )
+                continue
+            
+            all_epoch_data.append(epoch_data)
+
+            filename = os.path.basename(fp)
+            parts = filename.split("_") # e.g., CLASSLABEL_SUBJECTID_*.fif
+
+            # Extract class label
+            if self.condition_on_class_label:
+                if len(parts) >= 2: # Expect at least CLASSLABEL_SUBJECTID
+                    class_label_str = parts[0]
+                    if class_label_str not in self.label_to_int_id:
+                        self.label_to_int_id[class_label_str] = self.next_class_int_id
+                        self.next_class_int_id += 1
+                    all_class_labels_str.extend([class_label_str] * epoch_data.shape[0])
+                else:
+                    default_class_label = "UnknownClass"
+                    print(
+                        f"Warning: Filename {filename} does not follow CLASSLABEL_SUBJECTID_*.fif convention for class label. Assigning '{default_class_label}'."
+                    )
+                    if default_class_label not in self.label_to_int_id:
+                        self.label_to_int_id[default_class_label] = self.next_class_int_id
+                        self.next_class_int_id +=1
+                    all_class_labels_str.extend([default_class_label] * epoch_data.shape[0])
+
+            # Extract subject ID
+            if self.condition_on_subject_id:
+                if len(parts) >= 2: # Expect at least CLASSLABEL_SUBJECTID
+                    subject_id_str = parts[1]
+                    if subject_id_str not in self.subject_str_to_int_id:
+                        self.subject_str_to_int_id[subject_id_str] = self.next_subject_int_id
+                        self.next_subject_int_id += 1
+                    all_subject_ids_str.extend([subject_id_str] * epoch_data.shape[0])
+                else: # Fallback if filename doesn't have enough parts
+                    default_subject_id = filename.split(".")[0] # Use filename without extension as ID
+                    print(
+                        f"Warning: Filename {filename} does not follow CLASSLABEL_SUBJECTID_*.fif convention for subject ID. Using '{default_subject_id}' as ID."
+                    )
+                    if default_subject_id not in self.subject_str_to_int_id:
+                        self.subject_str_to_int_id[default_subject_id] = self.next_subject_int_id
+                        self.next_subject_int_id += 1
+                    all_subject_ids_str.extend([default_subject_id] * epoch_data.shape[0])
+
+        if not all_epoch_data:
+            raise ValueError(
+                "No valid data loaded. All files were skipped or resulted in errors. Check warnings for details."
+            )
+
+        # Concatenate data from all files
+        self.data_array_np = np.concatenate(all_epoch_data, axis=0)
+        # Standardize data across epochs and time dimensions (mean 0, std 1)
+        self.data_array_np = standardize_array(self.data_array_np, ax=(0, 2)) # ax=(0,2) standardizes each channel independently over epochs and time
+        self.data = torch.from_numpy(self.data_array_np).float() # Convert to float32 tensor
+
+        if self.condition_on_subject_id:
+            self.subject_ids = torch.tensor(
+                [self.subject_str_to_int_id[sid_str] for sid_str in all_subject_ids_str], dtype=torch.long
+            )
+        else:
+            self.subject_ids = None # Keep as None if not conditioning
+
+        if self.condition_on_class_label:
+            self.class_labels = torch.tensor(
+                [self.label_to_int_id[cls_str] for cls_str in all_class_labels_str], dtype=torch.long
+            )
+        else:
+            self.class_labels = None # Keep as None if not conditioning
+
+    def __len__(self):
+        """Returns the total number of epochs accumulated from all processed files."""
+        return len(self.data)
+
+    def __getitem__(self, index):
+        """
+        Returns a dictionary containing the signal and optional subject ID and class label for a given epoch index.
+
+        Args:
+            index (int): Index of the epoch.
+
+        Returns:
+            dict: A dictionary with 'signal', and optionally 'subject_id' and 'class_label' tensors.
+        """
+        item = {"signal": self.data[index]}
+        if self.condition_on_subject_id and self.subject_ids is not None:
+            item["subject_id"] = self.subject_ids[index]
+        if self.condition_on_class_label and self.class_labels is not None:
+            item["class_label"] = self.class_labels[index]
+        return item
 
 
 class TychoConditionalDataset(Dataset):
