@@ -4,11 +4,17 @@ name: fif_example
 # Path to the directory containing .fif files or a single .fif file
 # Example: '/path/to/your/eeg/data/' or '/path/to/your/eeg/data/subject1.fif'
 file_path: ???
-n_channels: 19
-# Number of epochs to load per subject/file.
-# Assumes each epoch is 5 seconds long at 200 Hz (1000 time points).
-n_epochs: 20
-sfreq: 200
+
+# n_channels, sfreq, and n_times (signal length in samples) are inferred from the first valid .fif file.
+# All subsequent .fif files must match these inferred parameters, otherwise they will be skipped.
+
+# Maximum number of epochs to load per subject/file.
+# If a file has fewer epochs than this number, all its epochs will be loaded.
+# If n_epochs is set to null (YAML for None) or 0, all available epochs from each file will be loaded.
+# Example: n_epochs: 20 # Loads max 20 epochs per file.
+# Example: n_epochs: null # Loads all epochs from all files.
+n_epochs: 20 
+
 # Set to True to enable conditioning on subject ID.
 # Subject IDs are derived from filenames if multiple files are loaded from a directory.
 condition_on_subject_id: False
@@ -19,7 +25,7 @@ condition_on_class_label: False
 
 # Example for conditional generation on class_label:
 # condition_on_class_label: True
-# num_classes: 3 # Specify the total number of unique classes
+# num_classes: 3 # Specify the total number of unique classes (if known, otherwise it's also inferred by the loader)
 
-# Data shape will be (n_subjects * n_epochs, n_channels, signal_length)
-# where signal_length is typically n_times from the epoch object (e.g., 1000 for 5s at 200Hz)
+# Data shape will be (total_loaded_epochs, n_channels, n_times)
+# where n_channels and n_times are inferred from the first valid file.
