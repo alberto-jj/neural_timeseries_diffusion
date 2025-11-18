@@ -20,6 +20,7 @@ from ntd.ajile_imputation_experiment import (
 from ntd.datasets import (
     AJILE_LFP,
     CRCNS_LFP,
+    FIFDataLoader,
     NER_BCI,
     TychoConditionalDataset,
     TychoUnconditionalDataset,
@@ -186,6 +187,13 @@ def init_dataset(cfg):
             lfp_types=cfg.dataset.lfp_types,
             signal_length=cfg.dataset.signal_length,
             filepath=cfg.dataset.filepath,
+        )
+    elif cfg.dataset.self == "fif_data":
+        data_set = FIFDataLoader(
+            file_path=cfg.dataset.file_path,
+            n_epochs=cfg.dataset.n_epochs,
+            condition_on_subject_id=cfg.dataset.condition_on_subject_id,
+            condition_on_class_label=cfg.dataset.condition_on_class_label,
         )
     elif cfg.dataset.self == "ajile":
         (
