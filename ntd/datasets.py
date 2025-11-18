@@ -71,16 +71,19 @@ class FIFDataLoader(Dataset):
     """
     Dataset loader for EEG data from .fif files.
 
-    Processes data into tensors and optionally includes subject IDs and class labels.
-    Assumes filenames follow a convention like CLASSLABEL_SUBJECTID_*.fif for label extraction.
-    `sfreq`, `n_channels`, and `n_times` (epoch length in points) are inferred from the first valid file.
-    Subsequent files must match these inferred parameters to be included.
+    Processes data into tensors and optionally includes subject IDs, class labels,
+    and a conditioning tensor that can be fed directly to conditional diffusion
+    models. Filenames are expected to follow the convention
+    ``CLASSLABEL_SUBJECTID_*.fif`` when class labels or subject IDs are requested.
+    ``sfreq``, ``n_channels``, and ``n_times`` (epoch length in points) are inferred
+    from the first valid file, and all subsequent files must match these inferred
+    parameters to be included.
     """
 
     def __init__(
         self,
         file_path,
-        n_epochs=None, # Max epochs per file. If None or 0, use all epochs from file.
+        n_epochs=None,  # Max epochs per file. If None or 0, use all epochs from file.
         condition_on_subject_id=False,
         condition_on_class_label=False,
     ):
@@ -90,20 +93,23 @@ class FIFDataLoader(Dataset):
         Args:
             file_path (str): Path to a directory of .fif files or a single .fif file.
             n_epochs (int, optional): Maximum number of epochs to use from each subject/file.
-                                     If None, 0, or greater than available epochs in a file,
-                                     all epochs from that file are used. Defaults to None.
-            condition_on_subject_id (bool): If True, extract and store subject IDs.
-            condition_on_class_label (bool): If True, extract and store class labels.
+                If None, 0, or greater than available epochs in a file, all epochs from
+                that file are used. Defaults to None.
+            condition_on_subject_id (bool): If True, extract and store subject IDs and
+                add a one-hot subject indicator to the ``cond`` tensor.
+            condition_on_class_label (bool): If True, extract and store class labels and
+                add a one-hot class indicator to the ``cond`` tensor.
         """
+
         self.file_path = file_path
-        self.n_epochs_max_per_file = n_epochs 
+        self.n_epochs_max_per_file = n_epochs
         self.condition_on_subject_id = condition_on_subject_id
         self.condition_on_class_label = condition_on_class_label
 
-        all_signals_list = [] # Renamed from all_epoch_data
+        all_signals_list = []  # Renamed from all_epoch_data
         all_subject_ids_str = []
         all_class_labels_str = []
-        
+
         self.label_to_int_id = {}
         self.next_class_int_id = 0
         self.subject_str_to_int_id = {}
@@ -137,9 +143,7 @@ class FIFDataLoader(Dataset):
                 print(f"Warning: Could not read or process {fp}. Skipping. Error: {e}")
                 continue
 
-            current_sfreq = current_epochs_object.info['sfreq']
-            # Use get_data(copy=False) if only shape is needed initially, but we need data later.
-            # Let's get data once and then derive shape.
+            current_sfreq = current_epochs_object.info["sfreq"]
             try:
                 # Picks 'eeg' and converts to float64 for consistency before potential slicing.
                 ep_data_full = current_epochs_object.get_data(picks="eeg").astype(np.float64)
@@ -159,9 +163,11 @@ class FIFDataLoader(Dataset):
                     f"sfreq={self.sfreq}, n_channels={self.n_channels}, n_times={self.n_times}"
                 )
             else:
-                if (current_sfreq != self.sfreq or
-                    current_n_channels != self.n_channels or
-                    current_n_times != self.n_times):
+                if (
+                    current_sfreq != self.sfreq
+                    or current_n_channels != self.n_channels
+                    or current_n_times != self.n_times
+                ):
                     print(
                         f"Warning: File {fp} parameters (sfreq={current_sfreq}, "
                         f"n_channels={current_n_channels}, n_times={current_n_times}) "
@@ -169,7 +175,7 @@ class FIFDataLoader(Dataset):
                         f"n_channels={self.n_channels}, n_times={self.n_times}). Skipping."
                     )
                     continue
-            
+
             # Handle n_epochs (max epochs per file)
             n_epochs_in_file = ep_data_full.shape[0]
             epochs_to_take = n_epochs_in_file
@@ -181,8 +187,8 @@ class FIFDataLoader(Dataset):
                         f"requested n_epochs={self.n_epochs_max_per_file}. Using all {n_epochs_in_file} epochs from this file."
                     )
                 epochs_to_take = min(n_epochs_in_file, self.n_epochs_max_per_file)
-            
-            if epochs_to_take == 0 : # Should not happen if n_epochs_max_per_file > 0 or None
+
+            if epochs_to_take == 0:  # Should not happen if n_epochs_max_per_file > 0 or None
                 print(f"Warning: Zero epochs selected for file {fp}. Skipping.")
                 continue
 
@@ -207,7 +213,7 @@ class FIFDataLoader(Dataset):
                     )
                     if default_class_label not in self.label_to_int_id:
                         self.label_to_int_id[default_class_label] = self.next_class_int_id
-                        self.next_class_int_id +=1
+                        self.next_class_int_id += 1
                     all_class_labels_str.extend([default_class_label] * epochs_to_take)
 
             if self.condition_on_subject_id:
@@ -228,7 +234,7 @@ class FIFDataLoader(Dataset):
                     all_subject_ids_str.extend([default_subject_id] * epochs_to_take)
         # --- End of file loop ---
 
-        if not all_signals_list: # Check if the list is empty
+        if not all_signals_list:  # Check if the list is empty
             raise ValueError(
                 "No valid EEG data loaded. Check file paths, format, and consistency of "
                 "data parameters (sfreq, n_channels, n_times) across files."
@@ -238,22 +244,49 @@ class FIFDataLoader(Dataset):
         self.data_array_np = np.concatenate(all_signals_list, axis=0)
         # Standardize data across epochs and time dimensions (mean 0, std 1)
         # ax=(0,2) standardizes each channel independently over all concatenated epochs and time points
-        self.data_array_np = standardize_array(self.data_array_np, ax=(0, 2)) 
-        self.data = torch.from_numpy(self.data_array_np).float() # Convert to float32 tensor
+        self.data_array_np = standardize_array(self.data_array_np, ax=(0, 2))
+        self.data = torch.from_numpy(self.data_array_np).float()  # Convert to float32 tensor
 
         if self.condition_on_subject_id:
             self.subject_ids = torch.tensor(
-                [self.subject_str_to_int_id[sid_str] for sid_str in all_subject_ids_str], dtype=torch.long
+                [self.subject_str_to_int_id[sid_str] for sid_str in all_subject_ids_str],
+                dtype=torch.long,
             )
         else:
-            self.subject_ids = None # Keep as None if not conditioning
+            self.subject_ids = None  # Keep as None if not conditioning
 
         if self.condition_on_class_label:
             self.class_labels = torch.tensor(
-                [self.label_to_int_id[cls_str] for cls_str in all_class_labels_str], dtype=torch.long
+                [self.label_to_int_id[cls_str] for cls_str in all_class_labels_str],
+                dtype=torch.long,
             )
         else:
-            self.class_labels = None # Keep as None if not conditioning
+            self.class_labels = None  # Keep as None if not conditioning
+
+        # Build conditioning tensors once so __getitem__ stays lightweight.
+        self.cond_dim = 0
+        cond_tensors = []
+
+        if self.condition_on_class_label:
+            class_one_hot = torch.nn.functional.one_hot(
+                self.class_labels, num_classes=len(self.label_to_int_id)
+            ).float()
+            class_cond = class_one_hot.unsqueeze(-1).repeat(1, 1, self.n_times)
+            cond_tensors.append(class_cond)
+            self.cond_dim += class_cond.shape[1]
+
+        if self.condition_on_subject_id:
+            subject_one_hot = torch.nn.functional.one_hot(
+                self.subject_ids, num_classes=len(self.subject_str_to_int_id)
+            ).float()
+            subject_cond = subject_one_hot.unsqueeze(-1).repeat(1, 1, self.n_times)
+            cond_tensors.append(subject_cond)
+            self.cond_dim += subject_cond.shape[1]
+
+        if cond_tensors:
+            self.cond = torch.cat(cond_tensors, dim=1)
+        else:
+            self.cond = None
 
     def __len__(self):
         """Returns the total number of epochs accumulated from all processed files."""
@@ -261,19 +294,23 @@ class FIFDataLoader(Dataset):
 
     def __getitem__(self, index):
         """
-        Returns a dictionary containing the signal and optional subject ID and class label for a given epoch index.
+        Returns a dictionary containing the signal and optional conditioning information for
+        a given epoch index.
 
         Args:
             index (int): Index of the epoch.
 
         Returns:
-            dict: A dictionary with 'signal', and optionally 'subject_id' and 'class_label' tensors.
+            dict: A dictionary with ``signal`` and, when requested, ``cond``, ``subject_id``,
+            and ``class_label`` tensors.
         """
         item = {"signal": self.data[index]}
         if self.condition_on_subject_id and self.subject_ids is not None:
             item["subject_id"] = self.subject_ids[index]
         if self.condition_on_class_label and self.class_labels is not None:
             item["class_label"] = self.class_labels[index]
+        if self.cond is not None:
+            item["cond"] = self.cond[index]
         return item
 
 
