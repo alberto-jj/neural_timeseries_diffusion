@@ -1,9 +1,14 @@
 # @package _group_
+self: fif_data
 _target_: ntd.datasets.FIFDataLoader
 name: fif_example
 # Path to the directory containing .fif files or a single .fif file
 # Example: '/path/to/your/eeg/data/' or '/path/to/your/eeg/data/subject1.fif'
 file_path: ???
+
+# Signal length (number of time points per epoch) expected by the network.
+# Set this to match the epoch length in your .fif files.
+signal_length: 1000
 
 # n_channels, sfreq, and n_times (signal length in samples) are inferred from the first valid .fif file.
 # All subsequent .fif files must match these inferred parameters, otherwise they will be skipped.
@@ -13,7 +18,7 @@ file_path: ???
 # If n_epochs is set to null (YAML for None) or 0, all available epochs from each file will be loaded.
 # Example: n_epochs: 20 # Loads max 20 epochs per file.
 # Example: n_epochs: null # Loads all epochs from all files.
-n_epochs: 20 
+n_epochs: 20
 
 # Set to True to enable conditioning on subject ID.
 # Subject IDs are derived from filenames if multiple files are loaded from a directory.
@@ -22,6 +27,14 @@ condition_on_subject_id: False
 # Class labels are extracted from filenames using the convention: CLASSLABEL_SUBJECTID_*.fif
 # e.g., PATIENT_S001_data.fif, CONTROL_S002_data.fif
 condition_on_class_label: False
+
+# When enabling conditioning above, set network.cond_dim to
+# the total number of one-hot channels (num_classes + num_subjects)
+# so the AdaConv model can accept the conditioning tensor.
+
+# Train/test split fraction and random seed, mirroring other dataset configs.
+train_test_split: 1.0
+split_seed: 0
 
 # Example for conditional generation on class_label:
 # condition_on_class_label: True
