@@ -15,7 +15,7 @@ Additionally, an example Jupyter notebook `example_ner_notebook.ipynb`, where a 
 ## Installation
 Install dependencies via pip:
 ```shell
-git clone https://github.com/mackelab/neural_timeseries_diffusion.git
+git clone https://github.com/alberto-jj/neural_timeseries_diffusion.git
 cd neural_timeseries_diffusion
 pip install -e .
 ```
